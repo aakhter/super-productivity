@@ -172,11 +172,47 @@ export class LayoutService {
   }
 
   private _scrollTaskElementIntoView(el: HTMLElement): void {
-    el.scrollIntoView({
+    const scrollContainer = this._getNearestScrollableAncestor(el);
+    if (!scrollContainer) {
+      el.scrollIntoView({
+        behavior: 'instant',
+        block: 'center',
+        inline: 'nearest',
+      });
+      return;
+    }
+
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const elementRect = el.getBoundingClientRect();
+    const relativeTop = elementRect.top - containerRect.top + scrollContainer.scrollTop;
+    const containerCenterOffset = scrollContainer.clientHeight / 2;
+    const elementCenterOffset = elementRect.height / 2;
+    const centeredTop = relativeTop - containerCenterOffset + elementCenterOffset;
+
+    scrollContainer.scrollTo({
+      top: Math.max(centeredTop, 0),
       behavior: 'instant',
-      block: 'center',
-      inline: 'nearest',
     });
+  }
+
+  private _getNearestScrollableAncestor(el: HTMLElement): HTMLElement | null {
+    let parent = el.parentElement;
+
+    while (parent) {
+      const style = window.getComputedStyle(parent);
+      const overflowY = style.overflowY;
+      const isScrollable =
+        (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+        parent.scrollHeight > parent.clientHeight;
+
+      if (isScrollable) {
+        return parent;
+      }
+
+      parent = parent.parentElement;
+    }
+
+    return null;
   }
 
   private _focusPreviousTaskOrFallback(): void {

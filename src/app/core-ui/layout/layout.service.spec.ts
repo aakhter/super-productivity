@@ -215,22 +215,40 @@ describe('LayoutService', () => {
 
   describe('scrollToNewTask', () => {
     it('should scroll an existing task into view after a short delay', (done) => {
+      const scrollContainer = document.createElement('div');
       const taskId = 'scroll-task';
       const taskElement = document.createElement('div');
       taskElement.id = `t-${taskId}`;
-      spyOn(taskElement, 'scrollIntoView');
-      document.body.appendChild(taskElement);
+      spyOn(scrollContainer, 'scrollTo');
+      Object.defineProperty(scrollContainer, 'clientHeight', { value: 400 });
+      Object.defineProperty(scrollContainer, 'scrollHeight', { value: 1000 });
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 50, writable: true });
+      spyOn(window, 'getComputedStyle').and.callFake((target: Element) => {
+        if (target === scrollContainer) {
+          return { overflowY: 'auto' } as CSSStyleDeclaration;
+        }
+        return { overflowY: 'visible' } as CSSStyleDeclaration;
+      });
+      spyOn(scrollContainer, 'getBoundingClientRect').and.returnValue({
+        top: 100,
+        height: 400,
+      } as DOMRect);
+      spyOn(taskElement, 'getBoundingClientRect').and.returnValue({
+        top: 350,
+        height: 40,
+      } as DOMRect);
+      scrollContainer.appendChild(taskElement);
+      document.body.appendChild(scrollContainer);
 
       service.scrollToNewTask(taskId);
 
       setTimeout(() => {
-        expect(taskElement.scrollIntoView).toHaveBeenCalledWith({
+        expect(scrollContainer.scrollTo).toHaveBeenCalledWith({
+          top: 120,
           behavior: 'instant',
-          block: 'center',
-          inline: 'nearest',
         });
 
-        document.body.removeChild(taskElement);
+        document.body.removeChild(scrollContainer);
         done();
       }, 100);
     });
@@ -247,24 +265,42 @@ describe('LayoutService', () => {
 
   describe('focusTaskInViewIfPossible', () => {
     it('should scroll the task into view and focus without re-scrolling', () => {
+      const scrollContainer = document.createElement('div');
       const taskId = 'focus-task';
       const taskElement = document.createElement('div');
       taskElement.id = `t-${taskId}`;
-      spyOn(taskElement, 'scrollIntoView');
+      spyOn(scrollContainer, 'scrollTo');
       spyOn(taskElement, 'focus');
-      document.body.appendChild(taskElement);
+      Object.defineProperty(scrollContainer, 'clientHeight', { value: 300 });
+      Object.defineProperty(scrollContainer, 'scrollHeight', { value: 1000 });
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 40, writable: true });
+      spyOn(window, 'getComputedStyle').and.callFake((target: Element) => {
+        if (target === scrollContainer) {
+          return { overflowY: 'auto' } as CSSStyleDeclaration;
+        }
+        return { overflowY: 'visible' } as CSSStyleDeclaration;
+      });
+      spyOn(scrollContainer, 'getBoundingClientRect').and.returnValue({
+        top: 50,
+        height: 300,
+      } as DOMRect);
+      spyOn(taskElement, 'getBoundingClientRect').and.returnValue({
+        top: 200,
+        height: 60,
+      } as DOMRect);
+      scrollContainer.appendChild(taskElement);
+      document.body.appendChild(scrollContainer);
 
       const result = service.focusTaskInViewIfPossible(taskId);
 
       expect(result).toBe(taskElement);
-      expect(taskElement.scrollIntoView).toHaveBeenCalledWith({
+      expect(scrollContainer.scrollTo).toHaveBeenCalledWith({
+        top: 70,
         behavior: 'instant',
-        block: 'center',
-        inline: 'nearest',
       });
       expect(taskElement.focus).toHaveBeenCalledWith({ preventScroll: true });
 
-      document.body.removeChild(taskElement);
+      document.body.removeChild(scrollContainer);
     });
 
     it('should return null when the task element does not exist', () => {
