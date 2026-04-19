@@ -244,4 +244,31 @@ describe('LayoutService', () => {
       }, 100);
     });
   });
+
+  describe('focusTaskInViewIfPossible', () => {
+    it('should scroll the task into view and focus without re-scrolling', () => {
+      const taskId = 'focus-task';
+      const taskElement = document.createElement('div');
+      taskElement.id = `t-${taskId}`;
+      spyOn(taskElement, 'scrollIntoView');
+      spyOn(taskElement, 'focus');
+      document.body.appendChild(taskElement);
+
+      const result = service.focusTaskInViewIfPossible(taskId);
+
+      expect(result).toBe(taskElement);
+      expect(taskElement.scrollIntoView).toHaveBeenCalledWith({
+        behavior: 'instant',
+        block: 'center',
+        inline: 'nearest',
+      });
+      expect(taskElement.focus).toHaveBeenCalledWith({ preventScroll: true });
+
+      document.body.removeChild(taskElement);
+    });
+
+    it('should return null when the task element does not exist', () => {
+      expect(service.focusTaskInViewIfPossible('missing-task')).toBeNull();
+    });
+  });
 });

@@ -142,13 +142,18 @@ export class LayoutService {
   }
 
   scrollToNewTask(taskId: string): void {
-    this._runForTaskElement(taskId, (el) => {
-      el.scrollIntoView({
-        behavior: 'instant',
-        block: 'center',
-        inline: 'nearest',
-      });
-    });
+    this._runForTaskElement(taskId, (el) => this._scrollTaskElementIntoView(el));
+  }
+
+  focusTaskInViewIfPossible(taskId: string): HTMLElement | null {
+    const el = document.getElementById(`t-${taskId}`);
+    if (!el) {
+      return null;
+    }
+
+    this._scrollTaskElementIntoView(el);
+    el.focus({ preventScroll: true });
+    return el;
   }
 
   private _runForTaskElement(
@@ -164,6 +169,14 @@ export class LayoutService {
         onNotFound?.();
       }
     }, LayoutService._TASK_ACTION_DELAY);
+  }
+
+  private _scrollTaskElementIntoView(el: HTMLElement): void {
+    el.scrollIntoView({
+      behavior: 'instant',
+      block: 'center',
+      inline: 'nearest',
+    });
   }
 
   private _focusPreviousTaskOrFallback(): void {

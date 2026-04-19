@@ -446,8 +446,7 @@ export class AppComponent implements OnDestroy, AfterViewInit {
     this._intervalTimer = setInterval(() => {
       counter += 1;
 
-      const el = document.getElementById(`t-${id}`);
-      el?.focus();
+      const el = this.layoutService.focusTaskInViewIfPossible(id);
 
       if (el && IS_MOBILE) {
         el.classList.add('mobile-highlight-searched-item');
