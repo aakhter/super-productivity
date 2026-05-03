@@ -36,6 +36,7 @@ import { ActivatedRoute, RouterOutlet } from '@angular/router';
 import { concatMap, first, take } from 'rxjs/operators';
 
 import { IS_MOBILE } from './util/is-mobile';
+import { recordSearchNavDebug } from './util/search-nav-debug';
 import { warpAnimation, warpInAnimation } from './ui/animations/warp.ani';
 import { AddTaskBarComponent } from './features/tasks/add-task-bar/add-task-bar.component';
 import { Dir } from '@angular/cdk/bidi';
@@ -189,7 +190,6 @@ export class AppComponent implements OnDestroy, AfterViewInit {
   );
 
   private _subs: Subscription = new Subscription();
-  private _intervalTimer?: NodeJS.Timeout;
 
   constructor() {
     this._startupService.init();
@@ -227,6 +227,10 @@ export class AppComponent implements OnDestroy, AfterViewInit {
     this._subs.add(
       this._activatedRoute.queryParams.subscribe((params) => {
         if (!!params.focusItem) {
+          recordSearchNavDebug('appComponent:focusQueryParam', {
+            focusItem: params.focusItem,
+            url: window.location.pathname + window.location.search,
+          });
           this._focusElement(params.focusItem);
         }
       }),
@@ -434,7 +438,6 @@ export class AppComponent implements OnDestroy, AfterViewInit {
 
   ngOnDestroy(): void {
     this._subs.unsubscribe();
-    if (this._intervalTimer) clearInterval(this._intervalTimer);
   }
 
   /**
@@ -442,22 +445,22 @@ export class AppComponent implements OnDestroy, AfterViewInit {
    * an interval seemed to feel the most responsive
    */
   private _focusElement(id: string): void {
-    let counter = 0;
-    this._intervalTimer = setInterval(() => {
-      counter += 1;
-
-      const el = this.layoutService.focusTaskInViewIfPossible(id);
-
+    recordSearchNavDebug('appComponent:focusElement', {
+      taskId: id,
+      url: window.location.pathname + window.location.search,
+    });
+    this.layoutService.focusTaskInViewWhenReady(id, (el) => {
+      recordSearchNavDebug('appComponent:focusElement:success', {
+        taskId: id,
+        url: window.location.pathname + window.location.search,
+        matchedElementId: el.id,
+      });
       if (el && IS_MOBILE) {
         el.classList.add('mobile-highlight-searched-item');
         el.addEventListener('blur', () =>
           el.classList.remove('mobile-highlight-searched-item'),
         );
       }
-
-      if ((el || counter === 4) && this._intervalTimer) {
-        clearInterval(this._intervalTimer);
-      }
-    }, 400);
+    });
   }
 }
