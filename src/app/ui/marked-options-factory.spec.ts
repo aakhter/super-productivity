@@ -390,6 +390,7 @@ describe('markedOptionsFactory', () => {
           // #8429: app deep-links must stay clickable
           'obsidian://open?vault=Notes',
           'vscode://file/home/user/x.ts',
+          'webexteams://im?space=ff135070-68f8-11f1-9229-c7e6cca7a7cd&message=f4f13440-6b50-11f1-8868-03e71232fa87',
         ].forEach((href) => {
           const result = linkRenderer({
             href,
@@ -413,6 +414,17 @@ describe('markedOptionsFactory', () => {
           'href="https://example.com/&quot; onmouseover=&quot;alert(1)"',
         );
       });
+    });
+
+    it('auto-links raw webexteams:// URIs with their query string intact', () => {
+      const uri =
+        'webexteams://im?space=ff135070-68f8-11f1-9229-c7e6cca7a7cd&message=f4f13440-6b50-11f1-8868-03e71232fa87';
+      const result = parseWithFactory(`Open ${uri}`);
+
+      expect(result).toContain(`href="${uri.replace('&', '&amp;')}"`);
+      expect(result).toContain(
+        'webexteams://im?space=ff135070-68f8-11f1-9229-c7e6cca7a7cd&amp;message=f4f13440-6b50-11f1-8868-03e71232fa87',
+      );
     });
   });
 

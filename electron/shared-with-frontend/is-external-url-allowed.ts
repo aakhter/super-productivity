@@ -31,6 +31,7 @@ export const ALLOWED_EXTERNAL_URL_SCHEMES = [
   'vscode-insiders:',
   'zotero:',
   'logseq:',
+  'webexteams:',
 ];
 
 const LOCAL_FILE_URL_PREFIX = 'file:///';

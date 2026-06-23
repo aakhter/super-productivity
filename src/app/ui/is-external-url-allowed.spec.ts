@@ -22,6 +22,7 @@ describe('isExternalUrlSchemeAllowed', () => {
       'vscode-insiders://file/home/user/x.ts',
       'zotero://select/items/0_ABCD1234',
       'logseq://graph/Notes?page=Today',
+      'webexteams://im?space=ff135070-68f8-11f1-9229-c7e6cca7a7cd&message=f4f13440-6b50-11f1-8868-03e71232fa87',
     ];
     allowed.forEach((url) => {
       it(`allows "${url}"`, () => {
@@ -42,6 +43,7 @@ describe('isExternalUrlSchemeAllowed', () => {
         'vscode-insiders:',
         'zotero:',
         'logseq:',
+        'webexteams:',
       ]);
     });
   });

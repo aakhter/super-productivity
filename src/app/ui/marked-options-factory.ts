@@ -1,5 +1,10 @@
 import { MarkedOptions, MarkedRenderer } from 'ngx-markdown';
-import { Hooks, Token } from 'marked';
+import {
+  Hooks,
+  type Token,
+  type TokenizerExtensionFunction,
+  type TokenizerStartFunction,
+} from 'marked';
 import {
   isExternalUrlSchemeAllowed,
   isPathSafeToOpen,
@@ -60,6 +65,48 @@ export const preprocessMarkdown = (markdown: string): string => {
       return `![${alt}](${url} "${dimensions}")`;
     },
   );
+};
+
+const WEBEX_TEAMS_URI_PREFIX = 'webexteams://';
+const WEBEX_TEAMS_URI_RE = /^webexteams:\/\/\S{1,2000}/i;
+const WEBEX_TRAILING_PUNCT_RE = /[.,;!?]+$/;
+
+const stripWebexTeamsUriTrailing = (raw: string): string => {
+  const uri = raw.replace(WEBEX_TRAILING_PUNCT_RE, '');
+  let opens = 0;
+  let closes = 0;
+  for (let i = 0; i < uri.length; i++) {
+    const c = uri.charCodeAt(i);
+    if (c === 40) opens++;
+    else if (c === 41) closes++;
+  }
+  let end = uri.length;
+  while (end > 0 && uri.charCodeAt(end - 1) === 41 && closes > opens) {
+    end--;
+    closes--;
+  }
+  return end < uri.length ? uri.substring(0, end) : uri;
+};
+
+const startWebexTeamsAutoLink: TokenizerStartFunction = (src: string): number | void => {
+  const index = src.toLowerCase().indexOf(WEBEX_TEAMS_URI_PREFIX);
+  return index >= 0 ? index : undefined;
+};
+
+const tokenizeWebexTeamsAutoLink: TokenizerExtensionFunction = (src: string) => {
+  const match = WEBEX_TEAMS_URI_RE.exec(src);
+  if (!match) {
+    return undefined;
+  }
+
+  const href = stripWebexTeamsUriTrailing(match[0]);
+  return {
+    type: 'link',
+    raw: href,
+    href,
+    text: href,
+    tokens: [{ type: 'text', raw: href, text: href }],
+  };
 };
 
 export const markedOptionsFactory = (): MarkedOptions => {
@@ -196,6 +243,12 @@ export const markedOptionsFactory = (): MarkedOptions => {
     gfm: true,
     breaks: true,
     pedantic: false,
+    extensions: {
+      renderers: {},
+      childTokens: {},
+      inline: [tokenizeWebexTeamsAutoLink],
+      startInline: [startWebexTeamsAutoLink],
+    },
   };
 
   // Add preprocessing hook to handle image sizing syntax

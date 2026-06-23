@@ -13,11 +13,12 @@ export const hasLinkHints = (text: string): boolean =>
   text.includes(LINK_HINT_WWW) ||
   text.includes(LINK_HINT_MARKDOWN);
 
-// URL regex matching URLs with protocol (http, https, file) or www prefix.
+// URL regex matching URLs with protocol (http, https, file, webexteams) or www prefix.
 // ftp://, ssh://, blob:, etc. are intentionally excluded — they are either
 // non-browsable or handled by _isUrlSchemeSafe's denylist for markdown links.
 // Limit URL length to 2000 chars to prevent ReDoS attacks.
-const URL_REGEX = /(?:(?:https?|file):\/\/\S{1,2000}(?=\s|$)|www\.\S{1,2000}(?=\s|$))/gi;
+const URL_REGEX =
+  /(?:(?:https?|file|webexteams):\/\/\S{1,2000}(?=\s|$)|www\.\S{1,2000}(?=\s|$))/gi;
 
 // Markdown link regex: [title](url)
 // The URL group allows one level of balanced parentheses so that links like
