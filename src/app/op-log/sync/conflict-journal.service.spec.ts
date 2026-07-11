@@ -3,6 +3,7 @@ import { ConflictJournalService } from './conflict-journal.service';
 import {
   ConflictJournalEntry,
   JOURNAL_MAX_ENTRIES,
+  JOURNAL_PRUNE_SLACK,
   JOURNAL_RETENTION_DAYS,
 } from './conflict-journal.model';
 import { buildConflictJournalEntry } from './conflict-journal-emission.util';
@@ -149,6 +150,39 @@ describe('ConflictJournalService (store)', () => {
       expect(await service.getEntry('entry-0')).toBeUndefined();
       expect((await service.list('history')).length).toBe(JOURNAL_MAX_ENTRIES);
       expect(await service.getEntry(`entry-${JOURNAL_MAX_ENTRIES}`)).toBeTruthy();
+    });
+  });
+
+  describe('opportunistic retention on record() (SPAP-36)', () => {
+    it('does NOT prune while the count is within the soft cap', async () => {
+      const now = Date.now();
+      const softCap = JOURNAL_MAX_ENTRIES + JOURNAL_PRUNE_SLACK;
+      for (let i = 0; i < softCap; i++) {
+        await service.record(
+          makeEntry({ id: `entry-${i}`, resolvedAt: now - (softCap - i) }),
+        );
+      }
+
+      // Exactly at the soft cap: nothing pruned mid-session yet.
+      expect((await service.list('history')).length).toBe(softCap);
+      expect(await service.getEntry('entry-0')).toBeTruthy();
+    });
+
+    it('prunes back to JOURNAL_MAX_ENTRIES when record() crosses the soft cap', async () => {
+      const now = Date.now();
+      const softCap = JOURNAL_MAX_ENTRIES + JOURNAL_PRUNE_SLACK;
+      // One entry past the soft cap → the crossing record() triggers the prune.
+      for (let i = 0; i <= softCap; i++) {
+        await service.record(
+          makeEntry({ id: `entry-${i}`, resolvedAt: now - (softCap - i) }),
+        );
+      }
+
+      const history = await service.list('history');
+      expect(history.length).toBe(JOURNAL_MAX_ENTRIES);
+      // Oldest overflow dropped, newest kept.
+      expect(await service.getEntry('entry-0')).toBeUndefined();
+      expect(await service.getEntry(`entry-${softCap}`)).toBeTruthy();
     });
   });
 

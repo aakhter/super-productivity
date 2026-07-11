@@ -124,6 +124,14 @@ export const JOURNAL_RETENTION_DAYS = 14;
 /** At most this many entries are kept (newest wins) — pruned on start. */
 export const JOURNAL_MAX_ENTRIES = 200;
 
+/**
+ * How far past JOURNAL_MAX_ENTRIES the store may grow before `record()` prunes
+ * mid-session (SPAP-36). Pruning reads the whole store, so it is amortized:
+ * the crossing record() prunes back down to JOURNAL_MAX_ENTRIES and the next
+ * prune is another JOURNAL_PRUNE_SLACK records away.
+ */
+export const JOURNAL_PRUNE_SLACK = 20;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NOISE_FIELDS
 //
