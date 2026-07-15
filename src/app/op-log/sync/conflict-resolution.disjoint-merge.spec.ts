@@ -4,6 +4,7 @@ import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictJournalService } from './conflict-journal.service';
 import { Action, Store } from '@ngrx/store';
 import { OperationApplierService } from '../apply/operation-applier.service';
+import { convertOpToAction } from '../apply/operation-converter.util';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { SnackService } from '../../core/snack/snack.service';
 import { ValidateStateService } from '../validation/validate-state.service';
@@ -1700,9 +1701,14 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       return { appended, applied };
     };
 
-    /** Applies one op's payload to a state map, mirroring the two consumer
-     *  paths: adapter `{ task: { id, changes } }` -> merge changes;
-     *  flat LWW payload -> shallow-merge all fields minus id (updateOne). */
+    // Content model: reconstruct the entity from the op's carried fields,
+    // mirroring the consumer paths — adapter `{ task: { id, changes } }` -> merge
+    // changes; nested `{ actionPayload }` (#8980/#8990) or flat LWW payload ->
+    // shallow-merge fields minus id (updateOne). This asserts WHICH fields the op
+    // transports for the no-receiver-only-field case, where every field is present
+    // on both sides so nothing is cleared. The receiver-only CLEARING that the
+    // 'replace'/setOne path performs is exercised through the real production
+    // reducer in the sibling test, which is where it actually matters (#8933).
     const applyOp = (
       state: Record<string, unknown>,
       o: Operation,
@@ -1711,6 +1717,12 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       const task = p['task'] as Record<string, unknown> | undefined;
       if (task && typeof task['changes'] === 'object') {
         return { ...state, ...(task['changes'] as Record<string, unknown>) };
+      }
+      const actionPayload = p['actionPayload'] as Record<string, unknown> | undefined;
+      if (actionPayload && typeof actionPayload === 'object') {
+        const changed = { ...actionPayload };
+        delete changed['id'];
+        return { ...state, ...changed };
       }
       const flat = { ...p };
       delete flat['id'];
@@ -1841,19 +1853,18 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       expect(pick(stateA)).toEqual({ title: 'C-title', notes: 'base' });
     });
 
-    // REGRESSION documenting a real runtime gap (tracked as a separate issue): a
-    // full local-win snapshot cannot CLEAR a field the winner never had but the
-    // loser absorbed from the merged delta. The LWW reducer applies the op via a
-    // shallow `updateOne` (not a replace), and SuperSync serializes ops with
-    // JSON.stringify, so an absent field can't travel as an explicit clear. Here B
-    // edits an OPTIONAL field (`dueDay`) C never has: A absorbs it via the merged
-    // delta, C's full snapshot omits it, and applying that snapshot to A through the
-    // PRODUCTION meta-reducer leaves A's `dueDay` intact — the clients DIVERGE, and
-    // the local-win op's dominating clock means this propagation creates no
-    // follow-up conflict that would repair it. This
-    // asserts today's ACTUAL behavior (not an aspiration); when the runtime learns
-    // to reconcile receiver-only fields, flip the `dueDay` assertions below.
-    it('does NOT clear a receiver-only field the loser absorbed — clients diverge (production reducer + JSON round-trip)', async () => {
+    // Pins the receiver-only CLEARING behavior. B edits an OPTIONAL field
+    // (`dueDay`) that C never has: A absorbs it via the merged delta, then C's
+    // later full local-win snapshot omits it. Because that snapshot rides an
+    // `lwwUpdateMode: 'replace'` op, the production meta-reducer applies it via
+    // setOne (a full entity swap), so A's absorbed `dueDay` — and B's `notes` —
+    // are CLEARED and the clients CONVERGE. This is the behavior the SPAP-43
+    // replace/setOne work established; the earlier shallow-`updateOne` path (and a
+    // hand-built action that keeps `lwwUpdateMode` out of `meta`) would instead
+    // strand the absorbed field on A. This guards against regressing to that
+    // non-clearing path. Ops travel the real wire shape (JSON round-trip) and are
+    // applied through the production `convertOpToAction` + meta-reducer seam.
+    it('clears a receiver-only field the loser absorbed via the replace-mode local-win op — A converges onto C for this ordering (production reducer + JSON round-trip)', async () => {
       // Round 1: A (title) vs B (notes + an OPTIONAL dueDay that C never has).
       const opA = op({
         id: 'op-A',
@@ -1922,19 +1933,24 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       expect(localWinOp).toBeDefined();
 
       // JSON round-trip — SuperSync serializes ops with JSON.stringify, so C's flat
-      // snapshot (which never had dueDay) reaches A with dueDay simply ABSENT; there
-      // is no way to encode "clear this field".
+      // snapshot (which never had dueDay) reaches A with dueDay simply ABSENT from
+      // the snapshot; the wire cannot encode "clear this field" explicitly.
       const wirePayload = JSON.parse(JSON.stringify(localWinOp.payload)) as Record<
         string,
         unknown
       >;
-      expect('dueDay' in wirePayload).toBe(false);
+      expect('dueDay' in (wirePayload['actionPayload'] as Record<string, unknown>)).toBe(
+        false,
+      );
 
-      // Apply the round-tripped local-win op to A through the PRODUCTION
-      // lwwUpdateMetaReducer — the exact `updateOne` shallow-merge path production
-      // takes for an '[TASK] LWW Update'. A's task carries the modelled post-round-2
-      // state (title reconciled to C, notes still B's, dueDay absorbed) plus the
-      // structural fields the reducer's relationship-repair reads.
+      // Apply the round-tripped local-win op to A through the PRODUCTION seam.
+      // convertOpToAction routes the op's `lwwUpdateMode: 'replace'` into
+      // action.meta, so lwwUpdateMetaReducer applies it via setOne — a full
+      // snapshot swap. (A hand-built action spreading lwwUpdateMode at the top
+      // level instead of meta silently takes the updateOne shallow-merge branch
+      // and hides this.) A's task carries the modelled post-round-2 state (title
+      // reconciled to C, notes still B's, dueDay absorbed) plus the structural
+      // fields the reducer's relationship-repair reads.
       const mockBase = jasmine.createSpy('base').and.callFake((s: unknown) => s);
       const prodReducer = lwwUpdateMetaReducer(mockBase);
       const aRootState = buildRootStateWithTask({
@@ -1946,16 +1962,10 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
         subTaskIds: [],
         modified: 1000,
       });
-      const action = {
-        type: '[TASK] LWW Update',
-        ...wirePayload,
-        meta: {
-          isPersistent: true,
-          entityType: 'TASK',
-          entityId: 'task-1',
-          isRemote: true,
-        },
-      } as unknown as Action;
+      const action = convertOpToAction({
+        ...localWinOp,
+        payload: wirePayload,
+      } as Operation) as unknown as Action;
       prodReducer(aRootState, action);
       const aTask = (
         mockBase.calls.mostRecent().args[0] as Record<
@@ -1964,16 +1974,26 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
         >
       )[TASK_FEATURE_NAME].entities['task-1'];
 
-      // ACTUAL CURRENT BEHAVIOR (the gap): shared fields reconcile to C's snapshot,
-      // but A KEEPS the receiver-only dueDay that C never had — so A and C DIVERGE
-      // on dueDay. The local-win op's dominating clock means this propagation
-      // creates no follow-up conflict that would repair it. (Flip the last two
-      // assertions when the runtime reconciles
-      // receiver-only fields.)
-      expect(aTask['title']).toBe('C-title'); // shared field reconciles
-      expect(aTask['notes']).toBe('base'); // shared field reconciles
-      expect(aTask['dueDay']).toBe('2026-07-15'); // NOT cleared → divergence
-      expect('dueDay' in stateC).toBe(false); // C never had it
+      // ACTUAL CURRENT BEHAVIOR: A's task entity converges onto C's snapshot. C's
+      // later local-win op is `lwwUpdateMode: 'replace'`, so the production reducer
+      // applies it via setOne — replacing A's whole task with C's snapshot (a
+      // COMPLETE current-state snapshot in production; createLWWUpdateOp warns that
+      // a partial one would lose data). Every field that snapshot omits is CLEARED.
+      // This is the SPAP-43 replace/setOne behavior; a shallow updateOne (the
+      // pre-#8990 path, or a mis-built action that keeps lwwUpdateMode out of meta)
+      // would instead strand dueDay on A and leave the clients divergent.
+      //
+      // The DISCRIMINATING proof is `notes` and `dueDay` below: `notes` only flips
+      // from the absorbed 'B-notes' to 'base', and `dueDay` only disappears, if the
+      // reducer actually engaged setOne (updateOne would keep dueDay). `title` was
+      // already 'C-title' on A before this step (absorbed in round 2a), so it
+      // corroborates but does not by itself prove the op was applied. Convergence
+      // here is at the task-entity level for THIS upload ordering (see the round-2
+      // scoping note above); it is not a whole-normalized-state / all-orderings claim.
+      expect(aTask['title']).toBe('C-title'); // already C's pre-reducer; unchanged by the replace
+      expect(aTask['notes']).toBe('base'); // 'B-notes' → 'base': setOne took C's snapshot
+      expect(aTask['dueDay']).toBeUndefined(); // absorbed field CLEARED by setOne (updateOne would keep it)
+      expect('dueDay' in stateC).toBe(false); // C never had it — A now matches C
     });
   });
 });
