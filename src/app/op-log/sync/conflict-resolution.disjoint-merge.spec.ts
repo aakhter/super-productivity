@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictJournalService } from './conflict-journal.service';
-import { Store } from '@ngrx/store';
+import { Action, Store } from '@ngrx/store';
 import { OperationApplierService } from '../apply/operation-applier.service';
 import { OperationLogStoreService } from '../persistence/operation-log-store.service';
 import { SnackService } from '../../core/snack/snack.service';
@@ -27,6 +27,48 @@ import {
   synthesizeMergedChanges,
   isDisjointMergeEligible,
 } from './conflict-disjoint-merge.util';
+import { lwwUpdateMetaReducer } from '../../root-store/meta/task-shared-meta-reducers/lww-update.meta-reducer';
+import { TASK_FEATURE_NAME } from '../../features/tasks/store/task.reducer';
+import { PROJECT_FEATURE_NAME } from '../../features/project/store/project.reducer';
+import { TAG_FEATURE_NAME } from '../../features/tag/store/tag.reducer';
+import { INBOX_PROJECT } from '../../features/project/project.const';
+import { TODAY_TAG } from '../../features/tag/tag.const';
+import { appStateFeatureKey } from '../../root-store/app-state/app-state.reducer';
+import { getDbDateStr } from '../../util/get-db-date-str';
+
+/**
+ * Minimal RootState for exercising the PRODUCTION `lwwUpdateMetaReducer` on a
+ * single TASK. Includes the slices its relationship-repair reads (project INBOX,
+ * TODAY tag, appState) so applying an LWW Update never throws on a missing slice.
+ */
+const buildRootStateWithTask = (task: Record<string, unknown>): unknown => ({
+  [TASK_FEATURE_NAME]: {
+    ids: [task['id']],
+    entities: { [task['id'] as string]: task },
+    currentTaskId: null,
+    selectedTaskId: null,
+    taskDetailTargetPanel: null,
+    isDataLoaded: true,
+    lastCurrentTaskId: null,
+  },
+  [PROJECT_FEATURE_NAME]: {
+    ids: [INBOX_PROJECT.id],
+    entities: {
+      [INBOX_PROJECT.id]: {
+        id: INBOX_PROJECT.id,
+        title: 'Inbox',
+        taskIds: [],
+        backlogTaskIds: [],
+        noteIds: [],
+      },
+    },
+  },
+  [TAG_FEATURE_NAME]: {
+    ids: [TODAY_TAG.id],
+    entities: { [TODAY_TAG.id]: { ...TODAY_TAG, taskIds: [] } },
+  },
+  [appStateFeatureKey]: { todayStr: getDbDateStr(), startOfNextDayDiffMs: 0 },
+});
 
 /**
  * SPAP-14 — disjoint-field auto-merge acceptance tests.
@@ -1541,17 +1583,24 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
   // cross-client propagation is MODELLED (justified by the dominating-clock
   // assertions below), not executed. Client B contributes only an input op, not
   // a tracked client. Its value: it goes red if `_createLocalWinUpdateOp` ever
-  // emits a partial delta instead of a full snapshot, which is exactly what lets
-  // the three clients reconverge.
+  // emits a partial delta instead of a full snapshot — a NECESSARY (not
+  // sufficient) condition for the fields both sides share to reconcile. A full
+  // snapshot still cannot clear a field the winner never had but the loser
+  // absorbed from the merged delta, because the reducer applies it via a shallow
+  // `updateOne`; that residual-field gap is the subject of the second test.
+  // Neither test asserts whole-state, cross-client convergence.
   describe('composition (3-client): a later overlapping edit beats the merged op', () => {
     // Adjudicates the "partial merged delta is not closed under later LWW
     // composition" concern: after a merged op loses whole-op LWW to a newer
     // overlapping edit from a third client, the clients are TRANSIENTLY apart
     // (the remote-win side keeps the merged delta's other field; the local-win
-    // side never applied it) — convergence depends entirely on the local-win
-    // side emitting a FULL-SNAPSHOT reconciling op. This spec pins that
-    // property: if _createLocalWinUpdateOp ever becomes a partial delta, the
-    // three clients diverge permanently and this test goes red.
+    // side never applied it) — reconciling the SHARED fields depends on the
+    // local-win side emitting a FULL-SNAPSHOT op. The first test pins that op
+    // property (full snapshot + dominating clock) and checks the shared fields
+    // line up; it does NOT assert whole-state cross-client convergence. The
+    // second test is an ENABLED regression for the KNOWN residual gap — a full
+    // snapshot cannot clear a receiver-only field the loser absorbed — asserting
+    // today's ACTUAL divergence (tracked for a runtime fix in SPAP-43).
     const resolveCapturing = async (
       clientId: string,
       currentState: Record<string, unknown>,
@@ -1673,7 +1722,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       notes: s['notes'],
     });
 
-    it('the full-snapshot local-win op reconciles the transient split (loss is consistent, not divergent)', async () => {
+    it('the full-snapshot local-win op reconciles fields present on both sides (no receiver-only field in play)', async () => {
       // Round 1: A (title) and B (notes) conflict -> disjoint merge on A.
       const opA = op({
         id: 'op-A',
@@ -1776,21 +1825,155 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       // local-win op reaches A as a plain remote op and applies directly.
       stateA = applyOp(stateA, localWinOp);
 
-      // CONVERGENCE (for THIS upload ordering — the merged op reaches C, so C
-      // emits the reconciling op): A and C end byte-identical, tagIds and all.
-      // B-notes are lost to LWW but CONSISTENTLY across clients (and journaled by
-      // the round-2 resolutions for review/flip), never as silent divergence.
-      // The inverse ordering (opC globally accepted first, so C never downloads
-      // the merged op) is a real-transport concern out of scope for this
-      // service-level composition test — it belongs to the multi-client sync
-      // harness (SPAP-34).
-      expect(stateA).toEqual(stateC);
-      expect(stateA).toEqual({
+      // SHARED-FIELD RECONCILIATION (deliberately NOT whole-state convergence):
+      // the fields both sides carry line up — A's `notes` (absorbed from the
+      // merged delta) is overwritten by C's snapshot value, and `title` already
+      // agreed. We do NOT assert byte-identical whole-state equality: the real
+      // lwwUpdateMetaReducer also stamps `modified` and repairs relationships
+      // (project.taskIds, tag/TODAY membership) that this field-level `applyOp`
+      // model omits. Whole-state, cross-client convergence is not established at
+      // this layer — in particular the inverse upload ordering (opC accepted
+      // first, the merged op rejected, so C never downloads it and emits no
+      // reconciling op) can leave the clients apart even on shared fields. That
+      // is a real-transport property for a dedicated multi-client harness, not
+      // this service-level composition test.
+      expect(pick(stateA)).toEqual(pick(stateC));
+      expect(pick(stateA)).toEqual({ title: 'C-title', notes: 'base' });
+    });
+
+    // REGRESSION documenting a real runtime gap (tracked as a separate issue): a
+    // full local-win snapshot cannot CLEAR a field the winner never had but the
+    // loser absorbed from the merged delta. The LWW reducer applies the op via a
+    // shallow `updateOne` (not a replace), and SuperSync serializes ops with
+    // JSON.stringify, so an absent field can't travel as an explicit clear. Here B
+    // edits an OPTIONAL field (`dueDay`) C never has: A absorbs it via the merged
+    // delta, C's full snapshot omits it, and applying that snapshot to A through the
+    // PRODUCTION meta-reducer leaves A's `dueDay` intact — the clients DIVERGE, and
+    // the local-win op's dominating clock means this propagation creates no
+    // follow-up conflict that would repair it. This
+    // asserts today's ACTUAL behavior (not an aspiration); when the runtime learns
+    // to reconcile receiver-only fields, flip the `dueDay` assertions below.
+    it('does NOT clear a receiver-only field the loser absorbed — clients diverge (production reducer + JSON round-trip)', async () => {
+      // Round 1: A (title) vs B (notes + an OPTIONAL dueDay that C never has).
+      const opA = op({
+        id: 'op-A',
+        clientId: 'clientA',
+        vectorClock: { clientA: 1 },
+        timestamp: 2000,
+        payload: { task: { id: 'task-1', changes: { title: 'A-title' } } },
+      });
+      const opB = op({
+        id: 'op-B',
+        clientId: 'clientB',
+        vectorClock: { clientB: 1 },
+        timestamp: 3000,
+        payload: {
+          task: { id: 'task-1', changes: { notes: 'B-notes', dueDay: '2026-07-15' } },
+        },
+      });
+
+      const r1 = await resolveCapturing(
+        'clientA',
+        { id: 'task-1', title: 'A-title', notes: 'base' },
+        conflictOf([opA], [opB]),
+      );
+      const mergedOp = r1.appended[0];
+      expect(mergedOp).toBeDefined();
+
+      // A absorbs the merged delta, INCLUDING the receiver-only dueDay.
+      let stateA = applyOp({ id: 'task-1', title: 'A-title', notes: 'base' }, mergedOp);
+      expect(stateA['dueDay']).toBe('2026-07-15');
+
+      // Third client C: overlapping newer title edit; its entity never had dueDay.
+      const opC = op({
+        id: 'op-C',
+        clientId: 'clientC',
+        vectorClock: { clientC: 1 },
+        timestamp: 4000,
+        payload: { task: { id: 'task-1', changes: { title: 'C-title' } } },
+      });
+      let stateC: Record<string, unknown> = {
         id: 'task-1',
         title: 'C-title',
         notes: 'base',
-        tagIds: ['keep-me'],
+      };
+      expect('dueDay' in stateC).toBe(false);
+
+      // Round 2 on A: merged op vs newer opC -> opC wins -> A applies it (partial).
+      const r2a = await resolveCapturing(
+        'clientA',
+        stateA,
+        conflictOf([mergedOp], [opC]),
+      );
+      for (const o of r2a.applied) {
+        stateA = applyOp(stateA, o);
+      }
+
+      // Round 2 on C: local opC vs remote merged op -> LOCAL win -> full snapshot.
+      const r2c = await resolveCapturing(
+        'clientC',
+        stateC,
+        conflictOf([opC], [mergedOp]),
+      );
+      for (const o of r2c.applied) {
+        stateC = applyOp(stateC, o);
+      }
+      const localWinOp = r2c.appended[0];
+      expect(localWinOp).toBeDefined();
+
+      // JSON round-trip — SuperSync serializes ops with JSON.stringify, so C's flat
+      // snapshot (which never had dueDay) reaches A with dueDay simply ABSENT; there
+      // is no way to encode "clear this field".
+      const wirePayload = JSON.parse(JSON.stringify(localWinOp.payload)) as Record<
+        string,
+        unknown
+      >;
+      expect('dueDay' in wirePayload).toBe(false);
+
+      // Apply the round-tripped local-win op to A through the PRODUCTION
+      // lwwUpdateMetaReducer — the exact `updateOne` shallow-merge path production
+      // takes for an '[TASK] LWW Update'. A's task carries the modelled post-round-2
+      // state (title reconciled to C, notes still B's, dueDay absorbed) plus the
+      // structural fields the reducer's relationship-repair reads.
+      const mockBase = jasmine.createSpy('base').and.callFake((s: unknown) => s);
+      const prodReducer = lwwUpdateMetaReducer(mockBase);
+      const aRootState = buildRootStateWithTask({
+        ...stateA,
+        dueWithTime: null,
+        projectId: null,
+        tagIds: [],
+        parentId: null,
+        subTaskIds: [],
+        modified: 1000,
       });
+      const action = {
+        type: '[TASK] LWW Update',
+        ...wirePayload,
+        meta: {
+          isPersistent: true,
+          entityType: 'TASK',
+          entityId: 'task-1',
+          isRemote: true,
+        },
+      } as unknown as Action;
+      prodReducer(aRootState, action);
+      const aTask = (
+        mockBase.calls.mostRecent().args[0] as Record<
+          string,
+          { entities: Record<string, Record<string, unknown>> }
+        >
+      )[TASK_FEATURE_NAME].entities['task-1'];
+
+      // ACTUAL CURRENT BEHAVIOR (the gap): shared fields reconcile to C's snapshot,
+      // but A KEEPS the receiver-only dueDay that C never had — so A and C DIVERGE
+      // on dueDay. The local-win op's dominating clock means this propagation
+      // creates no follow-up conflict that would repair it. (Flip the last two
+      // assertions when the runtime reconciles
+      // receiver-only fields.)
+      expect(aTask['title']).toBe('C-title'); // shared field reconciles
+      expect(aTask['notes']).toBe('base'); // shared field reconciles
+      expect(aTask['dueDay']).toBe('2026-07-15'); // NOT cleared → divergence
+      expect('dueDay' in stateC).toBe(false); // C never had it
     });
   });
 });
