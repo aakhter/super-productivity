@@ -72,7 +72,7 @@ const buildRootStateWithTask = (task: Record<string, unknown>): unknown => ({
 });
 
 /**
- * SPAP-14 — disjoint-field auto-merge acceptance tests.
+ * Disjoint-field auto-merge acceptance tests.
  *
  * (a) title-vs-notes concurrent edit → merged entity keeps BOTH; journal
  *     merged/disjoint-merge/info; not in unreviewed.
@@ -83,7 +83,7 @@ const buildRootStateWithTask = (task: Record<string, unknown>): unknown => ({
  * (e) two-client convergence: both orderings yield identical entity + dominating
  *     clocks.
  */
-describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
+describe('ConflictResolutionService — disjoint-field merge', () => {
   let service: ConflictResolutionService;
   let journal: ConflictJournalService;
   let mockStore: jasmine.SpyObj<Store>;
@@ -995,7 +995,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
     expect(result.localWinOpsCreated).toBe(1);
   });
 
-  // ── (a3) SPAP-14 fix: partial-delta merged op, no un-conflicted ride-along ──
+  // ── (a3) disjoint-merge fix: partial-delta merged op, no un-conflicted ride-along ──
   it('(a3) synthesizes a partial-delta merged op that excludes un-conflicted fields', async () => {
     // Current entity carries a field NEITHER side touched (timeSpentOnDay). A
     // full-entity snapshot would embed it and diverge across clients whose
@@ -1037,7 +1037,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
     expect('timeSpentOnDay' in payload).toBe(false);
   });
 
-  // ── (a4) SPAP-14 fix: refuse merge when the entity has >1 conflict this batch
+  // ── (a4) disjoint-merge fix: refuse merge when the entity has >1 conflict this batch
   it('(a4) refuses disjoint-merge for an entity with multiple conflicts (falls back to LWW)', async () => {
     mockStore.select.and.returnValue(
       of({ id: 'task-1', title: 'base', notes: 'base', timeEstimate: 5 }),
@@ -1107,7 +1107,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
     expect(await journal.list('history')).toEqual([]);
   });
 
-  // ── (a5) SPAP-14 fix: refuse merge for fallback-less entity types ───────────
+  // ── (a5) disjoint-merge fix: refuse merge for fallback-less entity types ───────────
   it('(a5) refuses disjoint-merge for a type without a RECREATE_FALLBACK (NOTE → LWW)', async () => {
     // A partial-delta merged op that later wins over a concurrent delete would
     // recreate a schema-INVALID NOTE (no RECREATE_FALLBACK). So NOTE disjoint
@@ -1374,7 +1374,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       });
     });
 
-    it("the merged DELTA is independent of each client's divergent current state (SPAP-14 divergence fix)", () => {
+    it("the merged DELTA is independent of each client's divergent current state (disjoint-merge divergence fix)", () => {
       // The two clients' current entities differ on an UN-conflicted field
       // (timeSpentOnDay) — e.g. one already applied a third device's edit the
       // other has not. A full-entity snapshot would drag that field along and
@@ -1874,7 +1874,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
     // later full local-win snapshot omits it. Because that snapshot rides an
     // `lwwUpdateMode: 'replace'` op, the production meta-reducer applies it via
     // setOne (a full entity swap), so A's absorbed `dueDay` — and B's `notes` —
-    // are CLEARED and the clients CONVERGE. This is the behavior the SPAP-43
+    // are CLEARED and the clients CONVERGE. This is the behavior the
     // replace/setOne work established; the earlier shallow-`updateOne` path (and a
     // hand-built action that keeps `lwwUpdateMode` out of `meta`) would instead
     // strand the absorbed field on A. This guards against regressing to that
@@ -1995,7 +1995,7 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       // applies it via setOne — replacing A's whole task with C's snapshot (a
       // COMPLETE current-state snapshot in production; createLWWUpdateOp warns that
       // a partial one would lose data). Every field that snapshot omits is CLEARED.
-      // This is the SPAP-43 replace/setOne behavior; a shallow updateOne (the
+      // This is the replace/setOne behavior; a shallow updateOne (the
       // pre-#8990 path, or a mis-built action that keeps lwwUpdateMode out of meta)
       // would instead strand dueDay on A and leave the clients divergent.
       //
