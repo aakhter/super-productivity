@@ -1585,11 +1585,15 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
   // assertions below), not executed. Client B contributes only an input op, not
   // a tracked client. Its value: it goes red if `_createLocalWinUpdateOp` ever
   // emits a partial delta instead of a full snapshot — a NECESSARY (not
-  // sufficient) condition for the fields both sides share to reconcile. A full
-  // snapshot still cannot clear a field the winner never had but the loser
-  // absorbed from the merged delta, because the reducer applies it via a shallow
-  // `updateOne`; that residual-field gap is the subject of the second test.
-  // Neither test asserts whole-state, cross-client convergence.
+  // sufficient) condition for the local-win side to reconstruct every field.
+  // The first test pins that op shape and checks the fields both sides share.
+  // The second test goes further: it drives the real production seam
+  // (convertOpToAction + lwwUpdateMetaReducer) and shows that a receiver-only
+  // field the loser absorbed IS cleared, because the local-win op carries
+  // `lwwUpdateMode: 'replace'` and the reducer applies it via setOne — so the
+  // clients CONVERGE at the task entity, but ONLY for receivers that honour
+  // replace-mode (see the scope note on the describe below). Neither test makes
+  // a whole-normalized-state or all-orderings convergence claim.
   describe('composition (3-client): a later overlapping edit beats the merged op', () => {
     // Adjudicates the "partial merged delta is not closed under later LWW
     // composition" concern: after a merged op loses whole-op LWW to a newer
@@ -1599,9 +1603,19 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
     // local-win side emitting a FULL-SNAPSHOT op. The first test pins that op
     // property (full snapshot + dominating clock) and checks the shared fields
     // line up; it does NOT assert whole-state cross-client convergence. The
-    // second test is an ENABLED regression for the KNOWN residual gap — a full
-    // snapshot cannot clear a receiver-only field the loser absorbed — asserting
-    // today's ACTUAL divergence (tracked for a runtime fix in SPAP-43).
+    // second test drives the production seam and pins the CONVERGENT outcome:
+    // because the local-win op carries `lwwUpdateMode: 'replace'`, the reducer
+    // applies it via setOne, CLEARING a receiver-only field the loser absorbed,
+    // so A converges onto C for this upload ordering.
+    //
+    // SCOPE — this convergence is receiver-version-dependent. The disjoint merge
+    // that sets up the scenario is enabled in production (unfrozen by #9095), and
+    // its merged op is an ordinary 'patch' that any client applies via updateOne.
+    // But the replace-mode local-win op is newer: a receiver predating replace-mode
+    // treats it as a plain LWW Update, applies C's snapshot via updateOne, keeps
+    // the absorbed field, and the receiver-only-field divergence persists. So in a
+    // mixed fleet this pins replace-aware behaviour only, not universal convergence;
+    // the residual older-client divergence is tracked separately as a runtime fix.
     const resolveCapturing = async (
       clientId: string,
       currentState: Record<string, unknown>,
@@ -1620,21 +1634,23 @@ describe('ConflictResolutionService — SPAP-14 disjoint-field merge', () => {
       const opLogStore = jasmine.createSpyObj('OperationLogStoreService', [
         'appendBatchSkipDuplicates',
         'appendMixedSourceBatchSkipDuplicates',
-        'appendWithVectorClockUpdate',
+        'appendWithVectorClockOverwrite',
         'markApplied',
         'markRejected',
         'markFailed',
         'getUnsyncedByEntity',
+        'getOpById',
         'mergeRemoteOpClocks',
         'markReducersCommittedAndMergeClocks',
       ]);
       opLogStore.mergeRemoteOpClocks.and.resolveTo(undefined);
       opLogStore.markReducersCommittedAndMergeClocks.and.resolveTo(undefined);
       opLogStore.getUnsyncedByEntity.and.resolveTo(new Map());
+      opLogStore.getOpById.and.resolveTo(undefined);
       opLogStore.markRejected.and.resolveTo(undefined);
       opLogStore.markApplied.and.resolveTo(undefined);
       opLogStore.markFailed.and.resolveTo(undefined);
-      opLogStore.appendWithVectorClockUpdate.and.resolveTo(1);
+      opLogStore.appendWithVectorClockOverwrite.and.resolveTo(1);
       opLogStore.appendBatchSkipDuplicates.and.callFake((ops: Operation[]) =>
         Promise.resolve({
           seqs: ops.map((_, i) => i + 1),
