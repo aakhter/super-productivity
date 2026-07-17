@@ -81,8 +81,12 @@ import { WrappedProviderService } from '../../op-log/sync-providers/wrapped-prov
 import { isSuperSyncWebSocketAccess } from '@sp/sync-providers/super-sync';
 import { isTransientNetworkError } from '@sp/sync-providers/http';
 import { HydrationStateService } from '../../op-log/apply/hydration-state.service';
-import { WholeDatasetMergeService } from '../../op-log/sync/whole-dataset-merge.service';
+import {
+  StaleReviewError,
+  WholeDatasetMergeService,
+} from '../../op-log/sync/whole-dataset-merge.service';
 import { WholeDatasetDiff } from '../../op-log/sync/whole-dataset-diff.util';
+import { VectorClock } from '../../core/util/vector-clock';
 import {
   ConflictReviewResult,
   DialogConflictReviewComponent,
@@ -1475,11 +1479,16 @@ export class SyncWrapperService {
         | Record<string, unknown>
         | undefined;
       let diffCache:
-        | Promise<{ diff: WholeDatasetDiff; localState: Record<string, unknown> }>
+        | Promise<{
+            diff: WholeDatasetDiff;
+            localState: Record<string, unknown>;
+            baselineVectorClock: VectorClock;
+          }>
         | undefined;
       const getDiffData = (): Promise<{
         diff: WholeDatasetDiff;
         localState: Record<string, unknown>;
+        baselineVectorClock: VectorClock;
       }> => {
         if (!diffCache) {
           diffCache = this._wholeDatasetMerge.computeDiff(remoteSnapshot);
@@ -1548,7 +1557,7 @@ export class SyncWrapperService {
         } else if (resolution === 'REVIEW') {
           // SPAP-16 — open the blocking per-item review modal.
           SyncLog.log('SyncWrapperService: User chose REVIEW - opening merge review');
-          const { diff, localState } = await getDiffData();
+          const { diff, localState, baselineVectorClock } = await getDiffData();
           const reviewResult = await firstValueFrom(
             this._openConflictReviewDialog$(diff),
           );
@@ -1565,6 +1574,7 @@ export class SyncWrapperService {
             diff,
             reviewResult.picks,
             error.remoteVectorClock,
+            baselineVectorClock,
           );
           this._providerManager.setSyncStatus('IN_SYNC');
           return SyncStatus.InSync;
@@ -1586,6 +1596,16 @@ export class SyncWrapperService {
           'SyncWrapperService: target changed mid-conflict-resolution, will re-sync against the current target',
         );
         this._providerManager.setSyncStatus('UNKNOWN_OR_CHANGED');
+        return 'HANDLED_ERROR';
+      }
+      if (resolutionError instanceof StaleReviewError) {
+        // SPAP-45: local data changed while the review modal was open; the picks
+        // are stale. applyMerge aborted before touching local state or the remote
+        // (no IN_SYNC). Pause and let the user re-resolve against fresh state.
+        this._snackService.open({
+          msg: T.F.SYNC.S.REVIEW_STALE_ABORTED,
+          type: 'ERROR',
+        });
         return 'HANDLED_ERROR';
       }
       // GHSA-9544-hjjr-fg8h: USE_LOCAL force-uploads, which refuses to send

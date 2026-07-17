@@ -40,6 +40,28 @@ import {
   pickKey,
 } from './whole-dataset-merge.util';
 import { ConflictJournalEntry, ConflictJournalFieldDiff } from './conflict-journal.model';
+import { VectorClockService } from './vector-clock.service';
+import { OperationWriteFlushService } from './operation-write-flush.service';
+import { TaskTimeSyncService } from '../../features/tasks/task-time-sync.service';
+import {
+  compareVectorClocks,
+  VectorClock,
+  VectorClockComparison,
+} from '../../core/util/vector-clock';
+
+/**
+ * Thrown when local reviewable state mutated (a task edit, a time-tracking flush)
+ * between when the review diff was computed and when Apply Merge runs. The picks
+ * were made against a now-stale base; applying them would hydrate that stale
+ * snapshot as a clean-slate SYNC_IMPORT and silently drop the concurrent ops.
+ * Abort instead — the user re-resolves against fresh state. (SPAP-45)
+ */
+export class StaleReviewError extends Error {
+  constructor() {
+    super('Local data changed during review; the merge base is stale.');
+    this.name = 'StaleReviewError';
+  }
+}
 
 @Injectable({ providedIn: 'root' })
 export class WholeDatasetMergeService {
@@ -48,21 +70,39 @@ export class WholeDatasetMergeService {
   private coordinator = inject(SyncImportConflictCoordinatorService);
   private journal = inject(ConflictJournalService);
   private clientIdService = inject(ClientIdService);
+  private vectorClockService = inject(VectorClockService);
+  private operationWriteFlushService = inject(OperationWriteFlushService);
+  private taskTimeSyncService = inject(TaskTimeSyncService);
 
   /**
    * Reads the current LOCAL complete state (entity models + archives) and diffs
    * it against the downloaded remote snapshot state.
    */
-  async computeDiff(
-    remoteSnapshotState: Record<string, unknown> | undefined,
-  ): Promise<{ diff: WholeDatasetDiff; localState: Record<string, unknown> }> {
-    const localState =
-      (await this.stateSnapshotService.getStateSnapshotAsync()) as unknown as Record<
-        string,
-        unknown
-      >;
-    const diff = computeWholeDatasetDiff(localState, remoteSnapshotState);
-    return { diff, localState };
+  async computeDiff(remoteSnapshotState: Record<string, unknown> | undefined): Promise<{
+    diff: WholeDatasetDiff;
+    localState: Record<string, unknown>;
+    baselineVectorClock: VectorClock;
+  }> {
+    // Drain batched tracked-time (accumulated timer ticks are not yet ops) so it
+    // is part of this baseline rather than surfacing as a phantom change later.
+    this.taskTimeSyncService.flush();
+    // Capture the local snapshot AND its baseline clock atomically under one
+    // operation-log cutoff (flushThenRunExclusive drains pending writes, then holds
+    // the lock while confirming none landed). This makes the picks and the
+    // staleness baseline correspond to the SAME durable state, so applyMerge can
+    // tell a genuine concurrent edit apart from a write that was merely draining
+    // when the review opened — without the capture race that made the two sources
+    // inconsistent. (SPAP-45)
+    return this.operationWriteFlushService.flushThenRunExclusive(async () => {
+      const localState =
+        (await this.stateSnapshotService.getStateSnapshotAsync()) as unknown as Record<
+          string,
+          unknown
+        >;
+      const diff = computeWholeDatasetDiff(localState, remoteSnapshotState);
+      const baselineVectorClock = await this.vectorClockService.getCurrentVectorClock();
+      return { diff, localState, baselineVectorClock };
+    });
   }
 
   /**
@@ -75,7 +115,37 @@ export class WholeDatasetMergeService {
     diff: WholeDatasetDiff,
     picks: MergePicks,
     remoteVectorClock?: Record<string, number>,
+    baselineVectorClock?: VectorClock,
   ): Promise<Record<string, unknown>> {
+    // SPAP-45 staleness gate. The review modal can stay open for minutes; a local
+    // edit (or batched tracked time) in that window advances the local clock. The
+    // picks were made against the snapshot taken at computeDiff, so applying them
+    // would hydrate that now-stale snapshot as a clean-slate SYNC_IMPORT and
+    // silently drop the concurrent ops. Drain tracked time, then re-read the clock
+    // under the SAME operation-log cutoff computeDiff used (flushThenRunExclusive)
+    // and compare against the baseline. If it advanced, abort BEFORE building or
+    // hydrating — never touch local state or the remote.
+    //
+    // Known residual: this cutoff still precedes the separate hydrate lock scope,
+    // so an op landing between here and the hydrate's own deferred-action window is
+    // not yet covered. Closing that fully needs the check and hydrate to share one
+    // cutoff and is tracked as a follow-up.
+    if (baselineVectorClock !== undefined) {
+      this.taskTimeSyncService.flush();
+      await this.operationWriteFlushService.flushThenRunExclusive(async () => {
+        const currentClock = await this.vectorClockService.getCurrentVectorClock();
+        if (
+          compareVectorClocks(currentClock, baselineVectorClock) !==
+          VectorClockComparison.EQUAL
+        ) {
+          OpLog.warn(
+            'WholeDatasetMergeService: local state changed during review — aborting stale merge.',
+          );
+          throw new StaleReviewError();
+        }
+      });
+    }
+
     const mergedState = buildMergedState(localState, diff, picks);
 
     OpLog.warn(

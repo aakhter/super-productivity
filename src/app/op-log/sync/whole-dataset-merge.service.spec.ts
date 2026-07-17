@@ -1,5 +1,11 @@
 import { TestBed } from '@angular/core/testing';
-import { WholeDatasetMergeService } from './whole-dataset-merge.service';
+import {
+  StaleReviewError,
+  WholeDatasetMergeService,
+} from './whole-dataset-merge.service';
+import { VectorClockService } from './vector-clock.service';
+import { OperationWriteFlushService } from './operation-write-flush.service';
+import { TaskTimeSyncService } from '../../features/tasks/task-time-sync.service';
 import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { SyncHydrationService } from '../persistence/sync-hydration.service';
 import { SyncImportConflictCoordinatorService } from './sync-import-conflict-coordinator.service';
@@ -23,6 +29,9 @@ describe('WholeDatasetMergeService', () => {
   let forceUpload: jasmine.Spy;
   let record: jasmine.Spy;
   let snapshot: jasmine.Spy;
+  let getClock: jasmine.Spy;
+  let flushExclusive: jasmine.Spy;
+  let taskTimeFlush: jasmine.Spy;
 
   const localState = {
     task: adapter({
@@ -44,6 +53,13 @@ describe('WholeDatasetMergeService', () => {
     snapshot = jasmine
       .createSpy('getStateSnapshotAsync')
       .and.resolveTo(localState as unknown as never);
+    getClock = jasmine.createSpy('getCurrentVectorClock').and.resolveTo({ devA: 1 });
+    // flushThenRunExclusive runs its callback under a clean op-log cutoff; the fake
+    // just invokes it so the callback's snapshot/clock read (and any throw) runs.
+    flushExclusive = jasmine
+      .createSpy('flushThenRunExclusive')
+      .and.callFake((fn: () => Promise<unknown>) => fn());
+    taskTimeFlush = jasmine.createSpy('flush').and.returnValue(undefined);
 
     TestBed.configureTestingModule({
       providers: [
@@ -59,6 +75,18 @@ describe('WholeDatasetMergeService', () => {
           provide: ClientIdService,
           useValue: { loadClientId: () => Promise.resolve('devA') },
         },
+        {
+          provide: VectorClockService,
+          useValue: { getCurrentVectorClock: getClock },
+        },
+        {
+          provide: OperationWriteFlushService,
+          useValue: { flushThenRunExclusive: flushExclusive },
+        },
+        {
+          provide: TaskTimeSyncService,
+          useValue: { flush: taskTimeFlush },
+        },
       ],
     });
     service = TestBed.inject(WholeDatasetMergeService);
@@ -71,6 +99,82 @@ describe('WholeDatasetMergeService', () => {
     expect(diff.differing.map((d) => d.entityId)).toEqual(['differ']);
     expect(diff.onlyLocal.map((d) => d.entityId)).toEqual(['onlyLocalDrop']);
     expect(diff.onlyRemote.map((d) => d.entityId)).toEqual(['onlyRemoteAdd']);
+  });
+
+  it('computeDiff drains tracked time and captures the snapshot + baseline clock under one exclusive cutoff', async () => {
+    const { localState: ls, baselineVectorClock } =
+      await service.computeDiff(remoteState);
+    // Tracked time drained before the cutoff; snapshot + clock both read inside the
+    // exclusive callback, so the picks and the staleness baseline correspond to the
+    // SAME durable state (no inconsistent-source capture race).
+    expect(taskTimeFlush).toHaveBeenCalledBefore(flushExclusive);
+    expect(flushExclusive).toHaveBeenCalled();
+    expect(snapshot).toHaveBeenCalled();
+    expect(getClock).toHaveBeenCalled();
+    expect(ls).toBe(localState as unknown as Record<string, unknown>);
+    expect(baselineVectorClock).toEqual({ devA: 1 });
+  });
+
+  // SPAP-45: the review modal can stay open for minutes; a local edit or a
+  // time-tracking flush in that window advances the local clock. Applying the
+  // picks would hydrate the now-stale snapshot as a clean-slate SYNC_IMPORT and
+  // silently drop those concurrent ops. Abort instead.
+  it('applyMerge ABORTS with StaleReviewError (no hydrate, no upload) when the local clock advanced during review', async () => {
+    const {
+      diff,
+      localState: base,
+      baselineVectorClock,
+    } = await service.computeDiff(remoteState);
+    const picks = buildDefaultPicks(diff);
+    // Only inspect the calls applyMerge itself makes (computeDiff already read the clock).
+    getClock.calls.reset();
+    flushExclusive.calls.reset();
+    taskTimeFlush.calls.reset();
+    // A concurrent local mutation while the modal was open advanced the clock.
+    getClock.and.resolveTo({ devA: 2 });
+
+    await expectAsync(
+      service.applyMerge(
+        {} as OperationSyncCapable,
+        base,
+        diff,
+        picks,
+        undefined,
+        baselineVectorClock,
+      ),
+    ).toBeRejectedWithError(StaleReviewError);
+
+    // Tracked time is drained, then the clock is re-read under the exclusive
+    // op-log cutoff — so a concurrent edit's op is durably reflected before the
+    // comparison (the soundness fix over the prior unflushed-clock attempt).
+    expect(taskTimeFlush).toHaveBeenCalledBefore(flushExclusive);
+    expect(flushExclusive).toHaveBeenCalled();
+    expect(getClock).toHaveBeenCalled();
+    // The stale merge never touched local state or the remote.
+    expect(hydrate).not.toHaveBeenCalled();
+    expect(forceUpload).not.toHaveBeenCalled();
+  });
+
+  it('applyMerge PROCEEDS and hydrates when the local clock is unchanged since computeDiff', async () => {
+    const {
+      diff,
+      localState: base,
+      baselineVectorClock,
+    } = await service.computeDiff(remoteState);
+    const picks = buildDefaultPicks(diff);
+    // getClock still resolves { devA: 1 } — unchanged, so not stale.
+
+    await service.applyMerge(
+      {} as OperationSyncCapable,
+      base,
+      diff,
+      picks,
+      undefined,
+      baselineVectorClock,
+    );
+
+    expect(hydrate).toHaveBeenCalled();
+    expect(forceUpload).toHaveBeenCalled();
   });
 
   it('applyMerge applies the merged state locally then force-uploads (in order)', async () => {

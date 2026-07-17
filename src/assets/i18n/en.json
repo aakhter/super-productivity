@@ -1673,6 +1673,7 @@
         "LOCAL_CHANGES_DISCARDED_SNAPSHOT": "{{count}} unsaved local change(s) discarded - sync downloaded newer data",
         "LOCAL_DATA_REPLACE_CANCELLED": "Sync cancelled. Your local data has been preserved.",
         "LOCAL_DATA_REPLACE_UNDO": "Your local data was replaced with the server's data.",
+        "REVIEW_STALE_ABORTED": "Your data changed while reviewing, so the merge was not applied. Please resolve the conflict again.",
         "LOCK_TIMEOUT_ERROR": "Sync timed out waiting for a previous operation to finish. Please try again.",
         "LOCAL_FILE_RESELECT_REQUIRED": "Local file sync needs the sync folder to be selected again after a security update. Open Sync settings and choose the folder once more.",
         "MIGRATION_FAILED": "Some synced changes could not be migrated. Sync is paused before them to protect your data; updating the app may fix this.",
